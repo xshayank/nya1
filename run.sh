@@ -38,9 +38,7 @@ echo "[*] Installing dependencies ..."
 "$VPY" -m pip install --disable-pip-version-check -q --upgrade pip >/dev/null
 if ! "$VPY" -m pip install --disable-pip-version-check -q -r requirements.txt; then
     echo "[!] PyPI install failed. Retrying via runflare mirror ..."
-    "$VPY" -m pip install --disable-pip-version-check -q -r requirements.txt \
-        -i https://mirror-pypi.runflare.com/simple/ \
-        --trusted-host mirror-pypi.runflare.com
+    "$VPY" -m pip install --disable-pip-version-check -q -r requirements.txt
 fi
 
 echo
