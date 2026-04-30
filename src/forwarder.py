@@ -14,6 +14,19 @@ from urllib.parse import urlparse, urlunparse
 
 log = logging.getLogger("Forwarder")
 
+# Well-known Google anycast IPs (domain fronting candidates)
+GOOGLE_FALLBACK_IPS = [
+    "216.239.38.120",
+    "216.239.36.120",
+    "216.239.32.120",
+    "216.239.34.120",
+    "142.250.185.78",
+    "142.250.80.46",
+    "172.217.16.46",
+    "74.125.24.100",
+    "64.233.160.100",
+]
+
 REASON_PHRASES = {
     200: "OK", 201: "Created", 204: "No Content",
     301: "Moved Permanently", 302: "Found", 303: "See Other",
@@ -143,46 +156,133 @@ class HTTPForwarder:
             log.error("GAS relay error: %s", e)
             return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
 
-    async def _do_gas_request(self, script_id, post_body, *, follow_redirect=True):
-        """Make a raw HTTPS POST to GAS. Follows one level of 30x redirect if needed."""
-        connect_host = self._google_ip if self._google_ip else "script.google.com"
+    async def _do_gas_request(self, script_id, post_body):
+        """POST to GAS /exec, follow the 302 redirect with GET. Tries multiple IPs on failure."""
         ssl_ctx = ssl.create_default_context()
-        path = f"/macros/s/{script_id}/exec"
+        exec_path = f"/macros/s/{script_id}/exec"
 
-        resp_raw = await self._raw_gas_post(connect_host, ssl_ctx, path, post_body)
+        # Build ordered list of IPs to try
+        ips_to_try = []
+        if self._google_ip:
+            ips_to_try.append(self._google_ip)
+        for ip in GOOGLE_FALLBACK_IPS:
+            if ip not in ips_to_try:
+                ips_to_try.append(ip)
 
-        if follow_redirect:
-            status, location = _parse_redirect(resp_raw)
-            if status in (301, 302, 303, 307, 308) and location:
-                log.debug("GAS redirect %d → %s", status, location)
-                parsed_loc = urlparse(location)
-                redirect_path = parsed_loc.path
-                if parsed_loc.query:
-                    redirect_path += "?" + parsed_loc.query
-                resp_raw = await self._raw_gas_post(connect_host, ssl_ctx, redirect_path, post_body)
+        last_exc = None
+        connect_host = None
+
+        # --- Step 1: POST to /exec, find a working IP ---
+        resp_raw = None
+        for ip in ips_to_try:
+            try:
+                resp_raw = await self._raw_https_request(
+                    ip, ssl_ctx, exec_path,
+                    method="POST",
+                    host_header="script.google.com",
+                    body=post_body,
+                )
+                connect_host = ip
+                break
+            except (OSError, asyncio.TimeoutError) as e:
+                log.debug("IP %s failed for POST /exec: %s", ip, e)
+                last_exc = e
+                continue
+
+        if resp_raw is None:
+            raise last_exc or RuntimeError(f"Failed to connect to GAS after trying {len(ips_to_try)} IP(s)")
+
+        # --- Step 2: Follow redirect if 301/302/303 ---
+        status, location = _parse_redirect(resp_raw)
+        if status in (301, 302, 303) and location:
+            log.debug("GAS redirect %d → %s", status, location)
+            parsed_loc = urlparse(location)
+            redirect_host = parsed_loc.hostname or "script.googleusercontent.com"
+            redirect_path = parsed_loc.path
+            if parsed_loc.query:
+                redirect_path += "?" + parsed_loc.query
+
+            # Follow redirect: GET, no body, correct Host header
+            # Try the same IP that worked for step 1 first
+            redirect_ips = [connect_host] + [ip for ip in ips_to_try if ip != connect_host]
+            for ip in redirect_ips:
+                try:
+                    resp_raw = await self._raw_https_request(
+                        ip, ssl_ctx, redirect_path,
+                        method="GET",
+                        host_header=redirect_host,
+                        body=None,
+                    )
+                    break
+                except (OSError, asyncio.TimeoutError) as e:
+                    log.debug("IP %s failed for GET redirect: %s", ip, e)
+                    last_exc = e
+                    continue
+
+        elif status in (307, 308) and location:
+            # 307/308: re-POST to redirect location
+            parsed_loc = urlparse(location)
+            redirect_host = parsed_loc.hostname or "script.google.com"
+            redirect_path = parsed_loc.path
+            if parsed_loc.query:
+                redirect_path += "?" + parsed_loc.query
+            for ip in [connect_host] + [ip for ip in ips_to_try if ip != connect_host]:
+                try:
+                    resp_raw = await self._raw_https_request(
+                        ip, ssl_ctx, redirect_path,
+                        method="POST",
+                        host_header=redirect_host,
+                        body=post_body,
+                    )
+                    break
+                except (OSError, asyncio.TimeoutError) as e:
+                    last_exc = e
+                    continue
 
         return resp_raw
 
-    async def _raw_gas_post(self, connect_host, ssl_ctx, path, post_body):
-        """Open a TLS connection to GAS and POST post_body to path. Returns raw response bytes."""
+    async def _raw_https_request(self, connect_host, ssl_ctx, path, *, method="POST", host_header, body=None):
+        """Make a single HTTPS request via domain-fronting (SNI=front_domain, Host=host_header).
+
+        connect_host: IP or hostname to TCP-connect to
+        path: URL path (and query) to request
+        method: HTTP method string
+        host_header: value for the HTTP Host header
+        body: bytes body (None for GET)
+        """
+        connect_timeout = min(10, self._relay_timeout)
+
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
                 connect_host, 443,
                 ssl=ssl_ctx,
                 server_hostname=self._front_domain,
             ),
-            timeout=self._relay_timeout,
+            timeout=connect_timeout,
         )
 
-        http_req = (
-            f"POST {path} HTTP/1.1\r\n"
-            f"Host: script.google.com\r\n"
-            f"Content-Type: application/json\r\n"
-            f"Content-Length: {len(post_body)}\r\n"
-            f"Accept-Encoding: identity\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
-        ).encode() + post_body
+        if body is not None:
+            req_lines = [
+                f"{method} {path} HTTP/1.1",
+                f"Host: {host_header}",
+                f"Content-Type: application/json",
+                f"Content-Length: {len(body)}",
+                f"Accept-Encoding: identity",
+                f"Connection: close",
+                "",
+                "",
+            ]
+            http_req = "\r\n".join(req_lines).encode() + body
+        else:
+            req_lines = [
+                f"{method} {path} HTTP/1.1",
+                f"Host: {host_header}",
+                f"Accept-Encoding: identity",
+                f"Connection: close",
+                "",
+                "",
+            ]
+            http_req = "\r\n".join(req_lines).encode()
 
         writer.write(http_req)
         await writer.drain()
