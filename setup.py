@@ -77,34 +77,51 @@ def load_base_config() -> dict:
         except Exception:
             pass
     return {
-        "mode": "apps_script",
-        "google_ip": "216.239.38.120",
-        "front_domain": "www.google.com",
+        "script_id": "YOUR_APPS_SCRIPT_DEPLOYMENT_ID",
+        "auth_key": "CHANGE_ME_TO_A_STRONG_SECRET",
+        "target_url": "http://test.com:80",
         "listen_host": "127.0.0.1",
-        "listen_port": 8085,
-        "socks5_enabled": True,
-        "socks5_port": 1080,
-        "log_level": "INFO",
-        "verify_ssl": True,
-        "lan_sharing": False,
+        "listen_port": 1080,
+        "front_domain": "www.google.com",
+        "google_ip": "216.239.38.120",
         "relay_timeout": 25,
-        "tls_connect_timeout": 15,
-        "tcp_connect_timeout": 10,
-        "max_response_body_bytes": 200 * 1024 * 1024,
-        "chunked_download_min_size": 5 * 1024 * 1024,
-        "chunked_download_chunk_size": 512 * 1024,
-        "chunked_download_max_parallel": 8,
-        "chunked_download_max_chunks": 256,
-        "hosts": {},
+        "log_level": "INFO",
     }
 
 
-def configure_apps_script(cfg: dict) -> dict:
+def write_config(cfg: dict) -> None:
+    if CONFIG_PATH.exists():
+        backup = CONFIG_PATH.with_suffix(".json.bak")
+        shutil.copy2(CONFIG_PATH, backup)
+        print(yellow(f"  existing config.json backed up to {backup.name}"))
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+
+def main() -> int:
+    print()
+    print(bold("HTTP Port Forwarder — setup wizard"))
+    print(dim("Answer a few questions and we'll write config.json for you."))
+
+    if CONFIG_PATH.exists():
+        if not prompt_yes_no("config.json already exists. Overwrite?", default=False):
+            print(dim("Nothing changed."))
+            return 0
+
+    cfg = load_base_config()
+
+    suggested_key = random_auth_key()
+    print()
+    print(bold("Shared password (auth_key)"))
+    print(dim("  Must match AUTH_KEY inside script/Code.gs."))
+    cfg["auth_key"] = prompt("auth_key", default=suggested_key)
+
     print()
     print(bold("Google Apps Script setup"))
     print(dim("  1. Open https://script.google.com -> New project"))
-    print(dim("  2. Paste apps_script/Code.gs from this repo into the editor"))
-    print(dim("  3. Set AUTH_KEY in Code.gs to the password below"))
+    print(dim("  2. Paste script/Code.gs from this repo into the editor"))
+    print(dim("  3. Set AUTH_KEY in Code.gs to the password above"))
     print(dim("  4. Deploy -> New deployment -> Web app"))
     print(dim("     Execute as: Me   |   Who has access: Anyone"))
     print(dim("  5. Copy the Deployment ID and paste it here"))
@@ -121,70 +138,23 @@ def configure_apps_script(cfg: dict) -> dict:
     else:
         cfg["script_ids"] = ids
         cfg.pop("script_id", None)
-    return cfg
 
+    print()
+    print(bold("Target HTTP endpoint"))
+    print(dim("  The fixed HTTP endpoint GAS will forward requests to."))
+    cfg["target_url"] = prompt("target_url", default=str(cfg.get("target_url", "http://test.com:80")))
 
-def configure_network(cfg: dict) -> dict:
     print()
     print(bold("Network settings") + dim("  (press enter to accept defaults)"))
-    cfg["lan_sharing"] = prompt_yes_no(
-        "Enable LAN sharing?",
-        default=bool(cfg.get("lan_sharing", False)),
-    )
 
-    default_host = str(cfg.get("listen_host", "127.0.0.1"))
-    if cfg["lan_sharing"] and default_host == "127.0.0.1":
-        default_host = "0.0.0.0"
-    cfg["listen_host"] = prompt("Listen host", default=default_host)
-
-    port = prompt("HTTP proxy port", default=str(cfg.get("listen_port", 8085)))
+    port = prompt("Local listen port", default=str(cfg.get("listen_port", 1080)))
     try:
         cfg["listen_port"] = int(port)
     except ValueError:
-        cfg["listen_port"] = 8085
+        cfg["listen_port"] = 1080
 
-    socks5 = prompt_yes_no("Enable SOCKS5 proxy?", default=bool(cfg.get("socks5_enabled", True)))
-    cfg["socks5_enabled"] = socks5
-    if socks5:
-        sport = prompt("SOCKS5 port", default=str(cfg.get("socks5_port", 1080)))
-        try:
-            cfg["socks5_port"] = int(sport)
-        except ValueError:
-            cfg["socks5_port"] = 1080
-    return cfg
-
-
-def write_config(cfg: dict) -> None:
-    if CONFIG_PATH.exists():
-        backup = CONFIG_PATH.with_suffix(".json.bak")
-        shutil.copy2(CONFIG_PATH, backup)
-        print(yellow(f"  existing config.json backed up to {backup.name}"))
-    with CONFIG_PATH.open("w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-        f.write("\n")
-
-
-def main() -> int:
-    print()
-    print(bold("mhr-cfw - setup wizard"))
-    print(dim("Answer a few questions and we'll write config.json for you."))
-
-    if CONFIG_PATH.exists():
-        if not prompt_yes_no("config.json already exists. Overwrite?", default=False):
-            print(dim("Nothing changed."))
-            return 0
-
-    cfg = load_base_config()
-    cfg["mode"] = "apps_script"
-
-    suggested_key = random_auth_key()
-    print()
-    print(bold("Shared password (auth_key)"))
-    print(dim("  Must match AUTH_KEY inside apps_script/Code.gs."))
-    cfg["auth_key"] = prompt("auth_key", default=suggested_key)
-
-    cfg = configure_apps_script(cfg)
-    cfg = configure_network(cfg)
+    cfg["front_domain"] = prompt("Front domain (SNI)", default=str(cfg.get("front_domain", "www.google.com")))
+    cfg["google_ip"] = prompt("Google IP (optional, leave blank for DNS)", default=str(cfg.get("google_ip", "")))
 
     write_config(cfg)
 
@@ -194,7 +164,7 @@ def main() -> int:
     print(bold("Next step:"))
     print(f"  python main.py")
     print()
-    print(yellow("Reminder: the AUTH_KEY inside apps_script/Code.gs must match the auth_key"))
+    print(yellow("Reminder: the AUTH_KEY inside script/Code.gs must match the auth_key"))
     print(yellow("you just entered - otherwise the relay will return 'unauthorized'."))
     return 0
 

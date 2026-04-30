@@ -1,18 +1,18 @@
 /**
- * DomainFront Relay — Google Apps Script With Cloudflare Worker Exit
+ * DomainFront Relay — Google Apps Script Direct HTTP Relay
  *
  * FLOW:
- *   Client → GAS (Google Apps Script) → CFW (Cloudflare Worker) → Internet
+ *   Client → GAS (Google Apps Script) → Target HTTP endpoint (directly)
  *
  * MODES:
- *   1. Single:  POST { k, m, u, h, b, ct, r }       → { s, h, b }
- *   2. Batch:   POST { k, q: [{m,u,h,b,ct,r}, ...] } → { q: [{s,h,b}, ...] }
+ *   1. Single:  POST { k, m, u, h, b }       → { s, h, b }
+ *   2. Batch:   POST { k, q: [{m,u,h,b}, ...] } → { q: [{s,h,b}, ...] }
  *
  * CHANGE THESE:
 */
 
 const AUTH_KEY = "STRONG_SECRET_KEY";
-const WORKER_URL = "https://example.workers.dev";
+const TARGET_URL = "http://test.com:80";
 
 const SKIP_HEADERS = {
   host: 1, connection: 1, "content-length": 1,
@@ -37,21 +37,41 @@ function _doSingle(req) {
     return _json({ e: "bad url" });
   }
 
-  var payload = _buildWorkerPayload(req);
+  var filteredHeaders = {};
+  if (req.h && typeof req.h === "object") {
+    for (var k in req.h) {
+      if (req.h.hasOwnProperty(k) && !SKIP_HEADERS[k.toLowerCase()]) {
+        filteredHeaders[k] = req.h[k];
+      }
+    }
+  }
 
-  var resp = UrlFetchApp.fetch(WORKER_URL, {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(payload),
+  var fetchOptions = {
+    method: (req.m || "GET").toUpperCase(),
+    headers: filteredHeaders,
     muteHttpExceptions: true,
     followRedirects: true
-  });
+  };
 
-  try {
-    return _json(JSON.parse(resp.getContentText()));
-  } catch (e) {
-    return _json({ e: "invalid worker response", raw: resp.getContentText() });
+  if (req.b) {
+    fetchOptions.payload = Utilities.newBlob(Utilities.base64Decode(req.b));
   }
+
+  var resp = UrlFetchApp.fetch(req.u, fetchOptions);
+
+  var respHeaders = resp.getHeaders();
+  var respHeadersObj = {};
+  for (var h in respHeaders) {
+    if (respHeaders.hasOwnProperty(h)) {
+      respHeadersObj[h] = respHeaders[h];
+    }
+  }
+
+  return _json({
+    s: resp.getResponseCode(),
+    h: respHeadersObj,
+    b: Utilities.base64Encode(resp.getContent())
+  });
 }
 
 function _doBatch(items) {
@@ -66,19 +86,28 @@ function _doBatch(items) {
       continue;
     }
 
-    var payload = _buildWorkerPayload(item);
-
-    fetchArgs.push({
-      _i: i,
-      _o: {
-        url: WORKER_URL,
-        method: "post",
-        contentType: "application/json",
-        payload: JSON.stringify(payload),
-        muteHttpExceptions: true,
-        followRedirects: true
+    var filteredHeaders = {};
+    if (item.h && typeof item.h === "object") {
+      for (var k in item.h) {
+        if (item.h.hasOwnProperty(k) && !SKIP_HEADERS[k.toLowerCase()]) {
+          filteredHeaders[k] = item.h[k];
+        }
       }
-    });
+    }
+
+    var fetchOptions = {
+      url: item.u,
+      method: (item.m || "GET").toUpperCase(),
+      headers: filteredHeaders,
+      muteHttpExceptions: true,
+      followRedirects: true
+    };
+
+    if (item.b) {
+      fetchOptions.payload = Utilities.newBlob(Utilities.base64Decode(item.b));
+    }
+
+    fetchArgs.push({ _i: i, _o: fetchOptions });
   }
 
   var responses = [];
@@ -94,43 +123,29 @@ function _doBatch(items) {
       results.push({ e: errorMap[i] });
     } else {
       var resp = responses[rIdx++];
-      try {
-        results.push(JSON.parse(resp.getContentText()));
-      } catch (e) {
-        results.push({ e: "invalid worker response", raw: resp.getContentText() });
+      var respHeaders = resp.getHeaders();
+      var respHeadersObj = {};
+      for (var h in respHeaders) {
+        if (respHeaders.hasOwnProperty(h)) {
+          respHeadersObj[h] = respHeaders[h];
+        }
       }
+      results.push({
+        s: resp.getResponseCode(),
+        h: respHeadersObj,
+        b: Utilities.base64Encode(resp.getContent())
+      });
     }
   }
 
   return _json({ q: results });
 }
 
-function _buildWorkerPayload(req) {
-  var headers = {};
-
-  if (req.h && typeof req.h === "object") {
-    for (var k in req.h) {
-      if (req.h.hasOwnProperty(k) && !SKIP_HEADERS[k.toLowerCase()]) {
-        headers[k] = req.h[k];
-      }
-    }
-  }
-
-  return {
-    u: req.u,
-    m: (req.m || "GET").toUpperCase(),
-    h: headers,
-    b: req.b || null,
-    ct: req.ct || null,
-    r: req.r !== false
-  };
-}
-
 function doGet(e) {
   return HtmlService.createHtmlOutput(
-    "<!DOCTYPE html><html><head><title>My App</title></head>" +
+    "<!DOCTYPE html><html><head><title>GAS Relay</title></head>" +
       '<body style="font-family:sans-serif;max-width:600px;margin:40px auto">' +
-      "<h1>Relay Active</h1><p>Cloudflare Worker routing enabled.</p>" +
+      "<h1>Direct HTTP relay active</h1><p>No Cloudflare. GAS connects directly to the target HTTP endpoint.</p>" +
       "</body></html>"
   );
 }
@@ -140,3 +155,4 @@ function _json(obj) {
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
