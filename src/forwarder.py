@@ -152,7 +152,7 @@ class HTTPForwarder:
             resp_raw = await self._do_gas_request(script_id, post_body)
             return _build_http_response(resp_raw)
 
-        except (OSError, asyncio.TimeoutError, Exception) as e:
+        except Exception as e:
             log.error("GAS relay error: %s", e)
             return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
 
@@ -190,7 +190,7 @@ class HTTPForwarder:
                 continue
 
         if resp_raw is None:
-            raise last_exc or RuntimeError("All Google IPs failed")
+            raise last_exc or RuntimeError(f"Failed to connect to GAS after trying {len(ips_to_try)} IP(s)")
 
         # --- Step 2: Follow redirect if 301/302/303 ---
         status, location = _parse_redirect(resp_raw)
