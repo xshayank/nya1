@@ -49,19 +49,21 @@ class HTTPForwarder:
     async def _handle_connection(self, reader, writer):
         peer = writer.get_extra_info("peername")
         log.debug("New connection from %s", peer)
+        # Idle timeout for waiting for the next request is shorter than the relay timeout.
+        idle_timeout = min(10, self._relay_timeout)
         try:
             while True:
-                # Read the raw HTTP request (headers + body)
+                # Read and parse the HTTP request (headers first, then body by Content-Length).
                 try:
-                    raw = await asyncio.wait_for(reader.read(65536), timeout=self._relay_timeout)
+                    method, path, headers_dict, body = await asyncio.wait_for(
+                        _read_http_request(reader),
+                        timeout=idle_timeout,
+                    )
                 except asyncio.TimeoutError:
                     log.debug("Idle timeout on connection from %s", peer)
                     break
-                if not raw:
+                except EOFError:
                     break
-
-                # Parse the HTTP request line to get method and path
-                method, path, headers_dict, body = _parse_http_request(raw)
 
                 # Build target URL: use target base + request path
                 parsed_target = urlparse(self._target_url)
@@ -167,32 +169,59 @@ class HTTPForwarder:
             return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
 
 
-def _parse_http_request(raw: bytes):
-    """Parse raw HTTP request bytes into (method, path, headers_dict, body)."""
-    try:
-        header_end = raw.find(b"\r\n\r\n")
-        if header_end == -1:
-            header_end = len(raw)
-            body = b""
-        else:
-            body = raw[header_end + 4:]
+async def _read_http_request(reader: asyncio.StreamReader):
+    """Read a complete HTTP request from the stream.
 
-        header_section = raw[:header_end].decode("utf-8", errors="replace")
+    Reads headers until CRLFCRLF, then reads the body based on Content-Length.
+    Raises EOFError if the connection is closed before a complete request arrives.
+    Returns (method, path, headers_dict, body).
+    """
+    # Accumulate header bytes until we see the end-of-headers marker.
+    header_buf = b""
+    while True:
+        chunk = await reader.read(4096)
+        if not chunk:
+            raise EOFError("Connection closed before complete HTTP request")
+        header_buf += chunk
+        sep = header_buf.find(b"\r\n\r\n")
+        if sep != -1:
+            break
+
+    header_section_raw = header_buf[:sep]
+    remainder = header_buf[sep + 4:]
+
+    # Parse request line and headers.
+    try:
+        header_section = header_section_raw.decode("utf-8", errors="replace")
         lines = header_section.split("\r\n")
         request_line = lines[0]
         parts = request_line.split(" ", 2)
         method = parts[0] if len(parts) > 0 else "GET"
         path = parts[1] if len(parts) > 1 else "/"
 
-        headers = {}
+        headers: dict[str, str] = {}
         for line in lines[1:]:
             if ":" in line:
                 k, _, v = line.partition(":")
                 headers[k.strip()] = v.strip()
-
-        return method, path, headers, body
     except Exception:
         return "GET", "/", {}, b""
+
+    # Read body according to Content-Length.
+    content_length = 0
+    try:
+        content_length = int(headers.get("Content-Length", 0))
+    except (ValueError, TypeError):
+        content_length = 0
+
+    body = remainder
+    while len(body) < content_length:
+        chunk = await reader.read(min(65536, content_length - len(body)))
+        if not chunk:
+            break
+        body += chunk
+
+    return method, path, headers, body[:content_length]
 
 
 def _build_http_response(gas_raw: bytes) -> bytes:
@@ -205,9 +234,8 @@ def _build_http_response(gas_raw: bytes) -> bytes:
         gas_headers_raw = gas_raw[:header_end]
         body_raw = gas_raw[header_end + 4:]
 
-        # Handle chunked transfer encoding if present
-        if (b"Transfer-Encoding: chunked" in gas_headers_raw
-                or b"transfer-encoding: chunked" in gas_headers_raw.lower()):
+        # Handle chunked transfer encoding if present (case-insensitive check).
+        if b"transfer-encoding: chunked" in gas_headers_raw.lower():
             body_raw = _decode_chunked(body_raw)
 
         json_body = body_raw.decode("utf-8", errors="replace").strip()
