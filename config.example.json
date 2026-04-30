@@ -6,6 +6,6 @@
   "listen_port": 1080,
   "front_domain": "www.google.com",
   "google_ip": "216.239.38.120",
-  "relay_timeout": 25,
+  "relay_timeout": 28,
   "log_level": "INFO"
 }

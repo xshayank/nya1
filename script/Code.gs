@@ -5,18 +5,18 @@
  *   Client → GAS (Google Apps Script) → Target HTTP endpoint (directly)
  *
  * MODES:
- *   1. Single:  POST { k, m, u, h, b }       → { s, h, b }
- *   2. Batch:   POST { k, q: [{m,u,h,b}, ...] } → { q: [{s,h,b}, ...] }
+ *   1. Single:  POST { k, m, u, h, b, ct }       → { s, h, b }
+ *   2. Batch:   POST { k, q: [{m,u,h,b,ct}, ...] } → { q: [{s,h,b}, ...] }
  *
  * CHANGE THESE:
 */
 
 const AUTH_KEY = "STRONG_SECRET_KEY";
-const TARGET_URL = "http://test.com:80";
 
 const SKIP_HEADERS = {
   host: 1, connection: 1, "content-length": 1,
   "transfer-encoding": 1, "proxy-connection": 1, "proxy-authorization": 1,
+  upgrade: 1,
 };
 
 function doPost(e) {
@@ -54,7 +54,9 @@ function _doSingle(req) {
   };
 
   if (req.b) {
-    fetchOptions.payload = Utilities.newBlob(Utilities.base64Decode(req.b));
+    var blob = Utilities.newBlob(Utilities.base64Decode(req.b));
+    if (req.ct) blob.setContentType(req.ct);
+    fetchOptions.payload = blob;
   }
 
   var resp = UrlFetchApp.fetch(req.u, fetchOptions);
@@ -104,7 +106,9 @@ function _doBatch(items) {
     };
 
     if (item.b) {
-      fetchOptions.payload = Utilities.newBlob(Utilities.base64Decode(item.b));
+      var blob = Utilities.newBlob(Utilities.base64Decode(item.b));
+      if (item.ct) blob.setContentType(item.ct);
+      fetchOptions.payload = blob;
     }
 
     fetchArgs.push({ _i: i, _o: fetchOptions });
@@ -145,7 +149,7 @@ function doGet(e) {
   return HtmlService.createHtmlOutput(
     "<!DOCTYPE html><html><head><title>GAS Relay</title></head>" +
       '<body style="font-family:sans-serif;max-width:600px;margin:40px auto">' +
-      "<h1>Direct HTTP relay active</h1><p>No Cloudflare. GAS connects directly to the target HTTP endpoint.</p>" +
+      "<h1>xhttp relay active (Xray/v2ray transport)</h1><p>No Cloudflare. GAS connects directly to the target HTTP endpoint.</p>" +
       "</body></html>"
   );
 }

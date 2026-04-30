@@ -116,3 +116,46 @@ Point any HTTP client at `http://127.0.0.1:1080`. All requests will be forwarded
 
 > **No certificate installation needed.** This is a plain TCP port forwarder, not an MITM proxy.
 
+---
+
+## Using with Xray / v2ray (xhttp transport)
+
+This forwarder is designed to work as an **xhttp transport endpoint** for Xray/v2ray.
+
+### Xray client outbound config
+
+Configure the Xray client to send xhttp traffic to `127.0.0.1:1080` (the forwarder's listen port).
+Set `target_url` in `config.json` to your actual remote xhttp server address.
+
+```json
+{
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "127.0.0.1",
+            "port": 1080,
+            "users": [{ "id": "YOUR-UUID", "encryption": "none" }]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "host": "127.0.0.1",
+          "path": "/your-path"
+        },
+        "security": "none"
+      }
+    }
+  ]
+}
+```
+
+The forwarder listens on `127.0.0.1:1080`, reads the xhttp requests (including chunked/binary bodies), and tunnels them through Google Apps Script to the real remote xhttp server specified in `target_url`.
+
+> **Note:** GAS has a 30-second execution limit per request. Set `relay_timeout` to `28` to stay safely within this limit.
+
