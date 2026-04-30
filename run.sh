@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# MasterHttpRelayVPN one-click launcher (Linux / macOS)
+# HTTP Port Forwarder one-click launcher (Linux / macOS)
 # Creates a local virtualenv, installs deps, runs the setup wizard
-# if needed, then starts the proxy.
+# if needed, then starts the forwarder.
 
 set -e
 cd "$(dirname "$0")"
@@ -47,6 +47,6 @@ if [ ! -f "config.json" ]; then
 fi
 
 echo
-echo "[*] Starting mhr-cfw ..."
+echo "[*] Starting HTTP Port Forwarder ..."
 echo
 exec "$VPY" main.py "$@"

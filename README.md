@@ -1,6 +1,6 @@
-# MHR-CFW - MasterHttpRelay + Cloudflare Worker
+# HTTP Port Forwarder via Google Apps Script
 
-[![GitHub](https://img.shields.io/badge/GitHub-MasterHttpRelayVPN-blue?logo=github)](https://github.com/denuitt1/mhr-cfw)
+[![GitHub](https://img.shields.io/badge/GitHub-nya1-blue?logo=github)](https://github.com/xshayank/nya1)
 
 
 | [English](README.md) | [Persian](README_FA.md) |
@@ -8,13 +8,13 @@
 
 ## Disclaimer
 
-`mhr-cfw` is provided for educational, testing, and research purposes only.
+This project is provided for educational, testing, and research purposes only.
 
 - **Provided without warranty:** This software is provided "AS IS", without express or implied warranty, including merchantability, fitness for a particular purpose, and non-infringement.
 - **Limitation of liability:** The developers and contributors are not responsible for any direct, indirect, incidental, consequential, or other damages resulting from the use of this project or the inability to use it.
-- **User responsibility:** Running this project outside controlled test environments may affect networks, accounts, proxies, certificates, or connected systems. You are solely responsible for installation, configuration, and use.
+- **User responsibility:** Running this project outside controlled test environments may affect networks, accounts, or connected systems. You are solely responsible for installation, configuration, and use.
 - **Legal compliance:** You are responsible for complying with all local, national, and international laws and regulations before using this software.
-- **Google services compliance:** If you use Google Apps Script or other Google services with this project, you are responsible for complying with Google's Terms of Service, acceptable use rules, quotas, and platform policies. Misuse may lead to suspension or termination of your Google account or deployments.
+- **Google services compliance:** If you use Google Apps Script with this project, you are responsible for complying with Google's Terms of Service, acceptable use rules, quotas, and platform policies. Misuse may lead to suspension or termination of your Google account or deployments.
 - **License terms:** Use, copying, distribution, and modification of this software are governed by the repository license. Any use outside those terms is prohibited.
 
 ---
@@ -22,56 +22,43 @@
 ## How It Works
 
 ```
-Client -> Local Proxy -> Google/CDN front -> GoogleAppsScript (GAS) Relay -> Cloudflare Worker -> Target website
-             |
-             +-> shows www.google.com to the network DPI filter
+Client → localhost:1080 (plain TCP) → Python forwarder → GAS (domain-fronted via www.google.com) → http://target:port
 ```
-In normal use, the browser sends traffic to the proxy running on your computer.
-The proxy sends that traffic through Google-facing infrastructure so the network only sees an allowed domain such as `www.google.com`.
-Your deployed relay then fetches the real website through cloudflare worker and sends the response back through the same path.
 
-This means the filter sees normal-looking Google traffic, while the actual destination stays hidden inside the relay request.
+1. You configure a **fixed HTTP target endpoint** (e.g. `http://test.com:80`) and a **local listen port** (e.g. `1080`).
+2. The Python app opens `localhost:1080` as a plain TCP/HTTP listener — **no TLS, no MITM, no certificate needed**.
+3. When a client sends an HTTP request to `localhost:1080`, the app reads it and tunnels it to **Google Apps Script** (domain-fronted via `www.google.com` → `script.google.com` so the bypass works), and GAS fetches the configured target endpoint directly — **no Cloudflare Worker**.
+4. The response is returned to the client.
 
---- 
+The network only sees traffic to `www.google.com`, while your request is secretly routed to the target.
+
+---
 
 ## How to Use
 
-### 1 - Download project and extract 
+### 1 — Download the project
 
 ```bash
-git clone https://github.com/denuitt1/mhr-cfw.git
-cd mhr-cfw
+git clone https://github.com/xshayank/nya1.git
+cd nya1
 pip install -r requirements.txt
 ```
+
 > **Can't reach PyPI directly?** Use this mirror instead:
 > ```bash
 > pip install -r requirements.txt -i https://mirror-pypi.runflare.com/simple/ --trusted-host mirror-pypi.runflare.com
 > ```
 
-
-### 2 - Set Up the Cloudflare Worker (worker.js)
-
-1. Open [Cloudflare Dashboard](https://dash.cloudflare.com/) and sign in with your Cloudflare account.
-2. From the sidebar, navigate to **Compute > Workers & Pages**
-3. Click **Create Application**, Choose **Start with Hello World** and click on **Deploy**
-4. Click on **Edit code** and **Delete** all the default code in the editor.
-5. Open the [`worker.js`](script/worker.js) file from this project (under `script/`), **copy everything**, and paste it into the Apps Script editor.
-6. **Important:** Change the worker on this line to the worker you created:
-   ```javascript
-   const WORKER_URL = "myworker.workers.dev";
-   ```
-7. Click **Deploy**.
-
-### 3 - Set Up the Google Relay (Code.gs)
+### 2 — Set Up the Google Apps Script relay (Code.gs)
 
 1. Open [Google Apps Script](https://script.google.com/) and sign in with your Google account.
 2. Click **New project**.
 3. **Delete** all the default code in the editor.
 4. Open the [`Code.gs`](script/Code.gs) file from this project (under `script/`), **copy everything**, and paste it into the Apps Script editor.
-5. **Important:** Change the password on this line to something only you know, also replace the worker url with your cloudflare worker:
+5. **Important:** Change the following constants to match your setup:
    ```javascript
-   const AUTH_KEY = "your-secret-password-here";
-   const WORKER_URL "https://myworker.workers.dev";
+   const AUTH_KEY = "your-secret-password-here";  // must match auth_key in config.json
+   const TARGET_URL = "http://test.com:80";        // the HTTP endpoint GAS will forward to
    ```
 6. Click **Deploy** → **New deployment**.
 7. Choose **Web app** as the type.
@@ -81,19 +68,51 @@ pip install -r requirements.txt
 9. Click **Deploy**.
 10. **Copy the Deployment ID** (it looks like a long random string). You'll need it in the next step.
 
-> ⚠️ Remember the password you set in step 3. You'll use the same password in the config file below.
+> ⚠️ No Cloudflare Worker is needed. GAS connects to the target HTTP endpoint directly.
 
-### 4 - Run
+### 3 — Configure
 
-Click on the `run.bat` file (on windows) or `run.sh` file (on linux) to start the relay.
+Copy `config.example.json` to `config.json` and fill in your values:
 
-If you're running for the first time it will prompt a setup wizard where you have to enter the AUTH_KEY and Google Apps Script Deployment ID.
-You should see a message saying the HTTP proxy is running on `127.0.0.1:8085`
+```json
+{
+  "script_id": "YOUR_APPS_SCRIPT_DEPLOYMENT_ID",
+  "auth_key": "your-secret-password-here",
+  "target_url": "http://test.com:80",
+  "listen_host": "127.0.0.1",
+  "listen_port": 1080,
+  "front_domain": "www.google.com",
+  "google_ip": "216.239.38.120",
+  "relay_timeout": 25,
+  "log_level": "INFO"
+}
+```
 
-You can use [FoxyProxy](https://getfoxyproxy.org/) [Chrome Extension](https://chromewebstore.google.com/detail/foxyproxy/gcknhkkoolaabfmlnjonogaaifnjlfnp?hl=en) or [Firefox Extension](https://addons.mozilla.org/en-US/firefox/addon/foxyproxy-standard/) to use this proxy in your browser.
+| Field | Description |
+|-------|-------------|
+| `script_id` | Your Google Apps Script Deployment ID |
+| `auth_key` | Shared secret — must match `AUTH_KEY` in `Code.gs` |
+| `target_url` | The fixed HTTP endpoint to forward requests to |
+| `listen_host` | Local bind address (default `127.0.0.1`) |
+| `listen_port` | Local TCP port clients connect to (default `1080`) |
+| `front_domain` | SNI domain for domain fronting (default `www.google.com`) |
+| `google_ip` | Google edge IP for domain fronting (optional) |
+| `relay_timeout` | Request timeout in seconds (default `25`) |
 
-### 5 - Test your connection
+### 4 — Run
 
-Open [ipleak.net](https://ipleak.net) in your browser, you should see your ip address set as cloudflare's.
+Click on the `run.bat` file (on Windows) or `run.sh` file (on Linux/macOS) to start the forwarder.
 
-<img width="1454" height="869" alt="image" src="https://github.com/user-attachments/assets/dfd3316d-69b6-4b0e-b564-fdb055dbdafd" />
+If you're running for the first time, it will prompt a setup wizard where you enter the `auth_key`, Deployment ID, and target URL.
+
+You should see a message like:
+```
+Listening on 127.0.0.1:1080 → http://test.com:80 (via GAS)
+```
+
+### 5 — Connect a client
+
+Point any HTTP client at `http://127.0.0.1:1080`. All requests will be forwarded to your configured `target_url` via the GAS relay.
+
+> **No certificate installation needed.** This is a plain TCP port forwarder, not an MITM proxy.
+

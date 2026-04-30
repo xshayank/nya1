@@ -2,10 +2,9 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-REM -------- MasterHttpRelayVPN one-click launcher (Windows) --------
+REM -------- HTTP Port Forwarder one-click launcher (Windows) --------
 REM Creates a local virtualenv, installs deps, runs the setup wizard
-REM if needed, then starts the proxy. Also checks and installs CA cert
-REM if not already trusted.
+REM if needed, then starts the forwarder.
 
 set "VENV_DIR=.venv"
 set "PY="
@@ -62,17 +61,8 @@ if not exist "config.json" (
     )
 )
 
-REM -------- Check for uninstall flag --------
-echo %* | findstr /C:"--uninstall-cert" >nul
-if not errorlevel 1 (
-    echo [*] Uninstalling CA certificate ...
-    "%VPY%" main.py --uninstall-cert
-    exit /b %errorlevel%
-)
-
-
 echo.
-echo [*] Starting mhr-cfw ...
+echo [*] Starting HTTP Port Forwarder ...
 echo.
 "%VPY%" main.py %*
 set "RC=%errorlevel%"
