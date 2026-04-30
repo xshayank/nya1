@@ -6,6 +6,7 @@ requests, and relays them to the configured target via Google Apps Script
 
 import asyncio
 import base64
+import gzip
 import json
 import logging
 import ssl
@@ -141,6 +142,7 @@ class HTTPForwarder:
                 f"Host: script.google.com\r\n"
                 f"Content-Type: application/json\r\n"
                 f"Content-Length: {len(post_body)}\r\n"
+                f"Accept-Encoding: identity\r\n"
                 f"Connection: close\r\n"
                 f"\r\n"
             ).encode() + post_body
@@ -229,16 +231,39 @@ def _build_http_response(gas_raw: bytes) -> bytes:
     try:
         header_end = gas_raw.find(b"\r\n\r\n")
         if header_end == -1:
+            log.debug("GAS raw response (no header end found): %r", gas_raw[:512])
             return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
 
         gas_headers_raw = gas_raw[:header_end]
         body_raw = gas_raw[header_end + 4:]
 
-        # Handle chunked transfer encoding if present (case-insensitive check).
+        # Follow redirects: if GAS returns 301/302/303/307/308, re-use the Location.
+        # (Shouldn't normally happen for POST /exec, but guard against it.)
+        first_line = gas_headers_raw.split(b"\r\n", 1)[0]
+        status_parts = first_line.split(b" ", 2)
+        http_status = int(status_parts[1]) if len(status_parts) >= 2 and status_parts[1].isdigit() else 200
+        if http_status in (301, 302, 303, 307, 308):
+            log.warning("GAS returned redirect %d — body will be empty; check script deployment URL", http_status)
+            log.debug("GAS redirect response: %r", gas_raw[:512])
+
+        # Handle chunked transfer encoding (case-insensitive).
         if b"transfer-encoding: chunked" in gas_headers_raw.lower():
             body_raw = _decode_chunked(body_raw)
 
+        # Decompress gzip if present (GAS sends gzip by default unless we ask for identity).
+        # Detected by magic bytes \x1f\x8b regardless of Content-Encoding header.
+        if body_raw[:2] == b"\x1f\x8b":
+            try:
+                body_raw = gzip.decompress(body_raw)
+            except Exception as gz_err:
+                log.debug("gzip decompress failed: %s", gz_err)
+
         json_body = body_raw.decode("utf-8", errors="replace").strip()
+
+        if not json_body:
+            log.debug("GAS raw response (empty body): %r", gas_raw[:512])
+            return b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 21\r\n\r\nEmpty GAS response body"
+
         data = json.loads(json_body)
 
         if "e" in data:
@@ -260,7 +285,7 @@ def _build_http_response(gas_raw: bytes) -> bytes:
         for k, v in resp_headers.items():
             k_lower = k.lower()
             if k_lower in ("transfer-encoding", "content-encoding"):
-                continue  # GAS already decoded
+                continue  # body is already decoded/decompressed
             lines.append(f"{k}: {v}\r\n".encode())
         lines.append(f"Content-Length: {len(body)}\r\n".encode())
         lines.append(b"\r\n")
@@ -270,6 +295,7 @@ def _build_http_response(gas_raw: bytes) -> bytes:
 
     except Exception as e:
         log.error("Failed to parse GAS response: %s", e)
+        log.debug("GAS raw response on error: %r", gas_raw[:512])
         return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
 
 
@@ -280,8 +306,10 @@ def _decode_chunked(data: bytes) -> bytes:
         crlf = data.find(b"\r\n")
         if crlf == -1:
             break
+        # Chunk size line may contain extensions after a semicolon, e.g. "1a; ext=val"
+        size_part = data[:crlf].split(b";", 1)[0].strip()
         try:
-            size = int(data[:crlf], 16)
+            size = int(size_part, 16)
         except ValueError:
             break
         if size == 0:
